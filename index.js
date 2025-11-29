@@ -2,77 +2,67 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const fetch = require('node-fetch');
 const path = require('path');
-const { lua, lauxlib, lualib, to_luastring, to_jsstring } = require('fengari');
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
-async function runLuaU(code) {
-    const L = lauxlib.luaL_newstate();
-    lualib.luaL_openlibs(L);
+// Simple in-memory output capture
+function runLuaU(code) {
+  let output = [];
+  let hasError = false;
+  let errorMsg = '';
 
-    let output = [];
-    let errors = [];
+  const print = (...args) => output.push(args.join(' '));
+  const warn = print;
+  error = (msg) => { hasError = true; errorMsg = msg; };
 
-    // Capture print()
-    lua.lua_pushcfunction(L, lua.lua_print = (L) => {
-        const n = lua.lua_gettop(L);
-        let str = '';
-        for (let i = 1; i <= n; i++) {
-            str += to_jsstring(lua.lua_tostring(L, i)) + (i < n ? '\t' : '');
-        }
-        output.push(str);
-        return 0;
-    });
-    lua.lua_setglobal(L, to_luastring('print'));
+  const game = {
+    HttpGet: async (url) => {
+      try {
+        const res = await fetch(url);
+        return await res.text();
+      } catch {
+        return `--[HttpGet failed]--`;
+      }
+    },
+    Players: { LocalPlayer: { Name: "YeekzyUser" } }
+  };
 
-    // HttpGet (real fetch)
-    lua.lua_pushcfunction(L, async (L) => {
-        const url = to_jsstring(lua.lua_tostring(L, 1));
-        try {
-            const res = await fetch(url);
-            const text = await res.text();
-            lua.lua_pushstring(L, to_luastring(text));
-        } catch (e) {
-            lua.lua_pushstring(L, to_luastring('HttpGet failed: ' + e.message));
-        }
-        return 1;
-    });
-    lua.lua_setglobal(L, to_luastring('HttpGet'));
+  const getgenv = () => ({ game, print, warn, error });
 
-    // Basic Roblox env
-    lauxlib.luaL_dostring(L, to_luastring(`
-        game = { HttpGet = HttpGet }
-        getgenv = function() return _G end
-        loadstring = load
-    `));
+  try {
+    // Luau polyfills + loadstring
+    const envCode = `
+      _G.print = print; _G.warn = warn; _G.error = error;
+      _G.game = game; _G.getgenv = getgenv;
+      loadstring = function(src)
+        local fn, err = load(src)
+        if not fn then error(err) end
+        return fn
+      end
+    `;
 
-    let result = { success: true, output: '', error: '' };
+    const fullCode = envCode + code;
+    const func = new Function('print', 'warn', 'error', 'game', 'getgenv', fullCode);
+    func(print, warn, error, game, getgenv);
 
-    try {
-        if (lauxlib.luaL_dostring(L, to_luastring(code)) !== lua.LUA_OK) {
-            result.success = false;
-            result.error = to_jsstring(lua.lua_tostring(L, -1));
-        }
-    } catch (e) {
-        result.success = false;
-        result.error = e.message || 'Runtime error';
-    }
-
-    result.output = output.join('\n') || 'Executed (no output)';
-    if (errors.length) result.error += '\n' + errors.join('\n');
-
-    lua.lua_close(L);
-    return result;
+    return { success: !hasError, result: output.join('\n') || 'Executed (no output)' };
+  } catch (e) {
+    return { success: false, result: 'Error: ' + (e.message || e) };
+  }
 }
 
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.post('/execute', async (req, res) => {
-    const code = req.body.code || '';
-    const result = await runLuaU(code);
+  const code = req.body.code || '';
+  const { success, result } = runLuaU(code);
 
-    res.sendFile(path.join(__dirname, 'public', 'index.html')); // We'll show
+  res.sendFile(path.join(__dirname, 'public', 'index.html')); // Will show result via JS in HTML
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Yeekzy Executor v5 ready on port ${port}`));
